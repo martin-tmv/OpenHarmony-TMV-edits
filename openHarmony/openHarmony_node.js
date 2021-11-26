@@ -177,7 +177,8 @@ $.oNode.prototype.setAttrGetterSetter = function (attr, context){
             // setting the attribute directly if no subattributes are present, or if value is a color (exception)
             if (_subAttrs.length == 0 || attr.type == "COLOR"){
                 if (attr.column != null) {
-                    if (!newValue.hasOwnProperty("frameNumber")) {
+                    if (!(newValue instanceof oFrame)) {
+                        // throw new Error("must pass an oFrame object to set an animated attribute")
                         // fallback to set frame 1
                         newValue = {value:newValue, frameNumber:1};
                     }
@@ -364,8 +365,6 @@ Object.defineProperty($.oNode.prototype, 'name', {
     // do the renaming and update the path
     node.rename(this.path, testName);
     this._path = _parent+'/'+testName;
-
-    this.refreshAttributes();
   }
 });
 
@@ -863,7 +862,7 @@ Object.defineProperty($.oNode.prototype, 'canCreateOutPorts', {
 
 /**
  * Returns the number of links connected to an in-port
- * @param   {int}      inPort      the number of the port to get links from.
+ * @param   {int}      outPort      the number of the port to get links from.
  */
 $.oNode.prototype.getInLinksNumber = function(inPort){
   if (this.inPorts < inPort) return null;
@@ -938,7 +937,6 @@ $.oNode.prototype.getFreeInPort = function(createNew){
  * @return  {bool}    The result of the link, if successful.
  */
 $.oNode.prototype.linkInNode = function( nodeToLink, ownPort, destPort, createPorts){
-  if (!(nodeToLink instanceof this.$.oNode)) throw new Error("Incorrect type for argument 'nodeToLink'. Must provide an $.oNode.")
 
   var _link = (new this.$.oLink(nodeToLink, this, destPort, ownPort)).getValidLink(createPorts, createPorts);
   if (_link == null) return;
@@ -1076,8 +1074,6 @@ $.oNode.prototype.getFreeOutPort = function(createNew){
  * @return  {bool}    The result of the link, if successful.
  */
 $.oNode.prototype.linkOutNode = function(nodeToLink, ownPort, destPort, createPorts){
-  if (!(nodeToLink instanceof this.$.oNode)) throw new Error("Incorrect type for argument 'nodeToLink'. Must provide an $.oNode.")
-
   var _link = (new this.$.oLink(this, nodeToLink, ownPort, destPort)).getValidLink(createPorts, createPorts)
   if (_link == null) return;
   this.$.debug("linking "+_link, this.$.DEBUG_LEVEL.LOG);
@@ -1206,8 +1202,6 @@ $.oNode.prototype.moveToGroup = function(group){
         this.unlinkOutPort(i, j);
       }
     }
-
-    this.refreshAttributes();
 
     this.$.endUndo();
   }
@@ -1700,8 +1694,8 @@ $.oPegNode.prototype.constructor = $.oPegNode;
  * It represents 'read' nodes or Drawing nodes in the scene.
  * @constructor
  * @augments   $.oNode
- * @param   {string}           path                          Path to the node in the network.
- * @param   {$.oScene}         oSceneObject                  Access to the oScene object of the DOM.
+ * @param   {string}         path                          Path to the node in the network.
+ * @param   {oScene}         oSceneObject                  Access to the oScene object of the DOM.
  * @example
  * // Drawing Nodes are more than a node, as they do not work without an associated Drawing column and element.
  * // adding a drawing node will automatically create a column and an element, unless they are provided as arguments.
@@ -1737,7 +1731,7 @@ $.oDrawingNode.prototype.constructor = $.oDrawingNode;
 /**
  * The element that holds the drawings displayed by the node.
  * @name $.oDrawingNode#element
- * @type {$.oElement}
+ * @type {oElement}
  */
 Object.defineProperty($.oDrawingNode.prototype, "element", {
   get : function(){
@@ -1754,8 +1748,8 @@ Object.defineProperty($.oDrawingNode.prototype, "element", {
 
 /**
  * The column that holds the drawings displayed by the node.
- * @name $.oDrawingNode.timingColumn
- * @type {$.oDrawingColumn}
+ * @name $.oDrawingNode#timingColumn
+ * @type {oColumn}
  */
 Object.defineProperty($.oDrawingNode.prototype, "timingColumn", {
   get : function(){
@@ -1778,11 +1772,12 @@ Object.defineProperty($.oDrawingNode.prototype, "timingColumn", {
 Object.defineProperty($.oDrawingNode.prototype, "usedColorIds", {
   get : function(){
     // this.$.log("used colors in node : "+this.name)
-    var _drawings = this.element.drawings;
+    var _timings = this.timings;
     var _colors = [];
 
-    for (var i in _drawings){
-      var _drawingColors = _drawings[i].usedColorIds;
+    for (var i in _timings){
+      var _drawingColors = DrawingTools.getDrawingUsedColors({node: this.path, frame: _timings[i].frameNumber});
+      // this.$.log(this.path+" frame: "+_timings[i].frameNumber+" has colors: "+_drawingColors)
       for (var c in _drawingColors){
         if (_colors.indexOf(_drawingColors[c]) == -1) _colors.push(_drawingColors[c]);
       }
@@ -1806,21 +1801,13 @@ Object.defineProperty($.oDrawingNode.prototype, "usedColors", {
     // look in both element and scene palettes
     var _palettes = this.palettes.concat(this.$.scn.palettes);
 
-    // build a palette/id list to speedup massive palettes/palette lists
-    var _colorIds = {}
-    for (var i in _palettes){
-      var _palette = _palettes[i];
-      var _colors = _palette.colors;
-      _colorIds[_palette.name] = {};
-      for (var j in _colors){
-        _colorIds[_palette.name][_colors[j].id] = _colors[j];
-      }
-    }
-
-    // for each id on the drawing, identify the corresponding color
     var _usedColors = _ids.map(function(id){
-      for (var paletteName in _colorIds){
-        if (_colorIds[paletteName][id]) return _colorIds[paletteName][id];
+      for (var j in _palettes){
+        var _color = _palettes[j].getColorById(id);
+        // color found
+        if (_color){
+          return _color;
+        }
       }
       throw new Error("Missing color found for id: "+id+". Color doesn't belong to any palette in the scene or element.");
     })
@@ -1891,17 +1878,19 @@ $.oDrawingNode.prototype.getDrawingAtFrame = function(frameNumber){
  * @return  {$.oPalette[]}   The palettes that contain the color IDs used by the drawings of the node.
  */
 $.oDrawingNode.prototype.getUsedPalettes = function(){
-  var _palettes = {};
+  var _palettes = this.scene.palettes;
   var _usedPalettes = [];
 
-  var _usedColors = this.usedColors;
-  // build an object of palettes under ids as keys to remove duplicates
-  for (var i in _usedColors){
-    var _palette = _usedColors[i].palette;
-    _palettes[_palette.id] = _palette;
-  }
-  for (var i in _palettes){
-    _usedPalettes.push(_palettes[i]);
+  var _usedColorIds = this.usedColorIds;
+  for (var i in _usedColorIds){
+    for (var j in _palettes){
+      var _color = _palettes[j].getColorById(_usedColorIds[i]);
+      // color found
+      if (_color){
+        if (_usedPalettes.indexOf(_palettes[j]) == -1) _usedPalettes.push(_palettes[j]);
+        break;
+      }
+    }
   }
 
   return _usedPalettes;
@@ -2160,8 +2149,8 @@ $.oTransformNamesObject.prototype = Object.create(Array.prototype);
 
 
 /**
- * creates a $.oTransformSwitch.names property with an index for each name to get/set the name value
  * @private
+ * creates a $.oTransformSwitch.names property with an index for each name to get/set the name value
  */
 Object.defineProperty($.oTransformNamesObject.prototype, "createGetterSetter", {
   enumerable:false,
@@ -2187,9 +2176,9 @@ Object.defineProperty($.oTransformNamesObject.prototype, "createGetterSetter", {
 
 
 /**
- * The length of the array of names on the oTransformSwitchNode node. Corresponds to the transformationnames.size subAttribute.
  * @name $.oTransformNamesObject#length
  * @type {int}
+ * The length of the array of names on the oTransformSwitchNode node. Corresponds to the transformationnames.size subAttribute.
  */
  Object.defineProperty($.oTransformNamesObject.prototype, "length", {
   enumerable:false,
@@ -2739,6 +2728,7 @@ $.oGroupNode.prototype.addGroup = function( name, addComposite, addPeg, includeN
     if (includeNodes.length > 0){
       includeNodes = includeNodes.sort(function(a, b){return a.timelineIndex()>=b.timelineIndex()?1:-1})
 
+
       var _links = this.scene.getNodesLinks(includeNodes);
 
       for (var i in includeNodes){
@@ -3236,11 +3226,11 @@ $.oGroupNode.prototype.updatePSD = function( path, separateLayers ){
 
 /**
  * Import a generic image format (PNG, JPG, TGA etc) as a read node.
- * @param {string} path The image file to import.
- * @param {string} [alignment="ASIS"] Alignment type.
- * @param {$.oPoint} [nodePosition={0,0,0}] The position for the node to be placed in the node view.
+ * @param   {string}       path                          The image file to import.
+ * @param   {string}         [alignment="ASIS"]            Alignment type.
+ * @param   {$.oPoint}       [nodePosition={0,0,0}]        The position for the node to be placed in the node view.
  *
- * @return  {$.oNode}    The node for the imported image
+ * @return  {$.oNode[]}    The nodes that have been updated/created
  */
 $.oGroupNode.prototype.importImage = function( path, alignment, nodePosition){
   if (typeof alignment === 'undefined') var alignment = "ASIS"; // create an enum for alignments?
@@ -3341,29 +3331,66 @@ $.oGroupNode.prototype.importQT = function( path, importSound, extendScene, alig
   // setup the node
   _qtNode.can_animate = false;
   _qtNode.alignment_rule = alignment;
-
-  var _tempFolder = this.tempFolder.path + "/movImport/" + _elementName;
-  var _audioPath = _tempFolder + "/" + _elementName + ".wav"
+  
+  // fixes by Martin S. Siegrist 21/10/2021 for macOS
+  
+  var dir = new Dir;
+//  var _tempFolder = scene.tempProjectPathRemapped() + "/movie/" + _elementName+"/";
+  var _tempFolder = scene.tempProjectPathRemapped() + "/" + _elementName+"/";
+  dir.path = _tempFolder;
+  if (dir.exists != true) {
+  	 dir.mkdir();
+  }
+ 
+  var _audioPath = scene.tempProjectPathRemapped() + "/audio/" + _elementName + ".wav"
+  
+  // win
+//  var _tempFolder = this.tempFolder.path + "/movImport/" + _elementName;
+//  var _audioPath = _tempFolder + "/" + _elementName + ".wav"
+  
 
   // setup import
 
   MovieImport.setMovieFilename(_QTFile.path);
+  $.log(_QTFile.path);
   MovieImport.setImageFolder(_tempFolder);
+  $.log(_tempFolder);
   MovieImport.setImagePrefix(_elementName);
+  $.log(_elementName);
   MovieImport.setAudioFile(_audioPath);
+  $.log(_audioPath);
   this.$.log("doing import");
   MovieImport.doImport();
   this.$.log("import finished");
   var QTlength = MovieImport.numberOfImages()-1;
+  
+    // fixes by Martin S. Siegrist 21/10/2021 for macOS
+ 	var selectedFolder = new $.oFolder(_tempFolder);
+	var fileList = selectedFolder.listFiles();
 
-  this.$.debug("number of images imported : "+QTlength, this.$.DEBUG_LEVEL.ERROR);
+$.log("fileList.length: " + fileList.length);
+$.log("scene.getStopFrame().length: " + scene.getStopFrame());
+
+	if (QTlength <=0 ) {
+		if (fileList.length <=0) {
+			QTlength = scene.getStopFrame();
+		} else {
+			QTlength = fileList.length;
+		}
+		
+	}
+	// end fixes
+
+  this.$.log("number of images imported : "+QTlength, this.$.DEBUG_LEVEL.ERROR);
 
   if (extendScene) this.scene.length = QTlength;
 
   // create expositions on the node
   for (var i = 1; i <= QTlength; i++ ) {
     // move the frame into the drawing
+      // fixes by Martin S. Siegrist 21/10/2021 for macOS
     var _framePath = _tempFolder + '/'+_elementName+'-' + i + '.png';
+//    var _framePath = _tempFolder + '-' + i + '.png';
     var _drawing = _element.addDrawing(i, i, _framePath);
   }
 
